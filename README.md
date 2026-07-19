@@ -17,6 +17,34 @@ race-condition and its fix, identity resolution, fail-open vs fail-closed).
 
 ---
 
+## Results — the distributed limit holds (and why it matters)
+
+The headline experiment: **3 separate gateway processes, one shared Redis,
+300 concurrent requests** spread across all of them, free tier = 100/min.
+
+```
+                         Redis + atomic Lua          In-memory (per-process)
+                         (distributed backend)       (local state, broken)
+  gw-1  handled 100      allowed  33                 allowed 100
+  gw-2  handled 100      allowed  34                 allowed 100
+  gw-3  handled 100      allowed  33                 allowed 100
+  ----------------------------------------------------------------------------
+  GLOBAL allowed         100  ✅ = the limit          300  ❌ = limit × 3
+  GLOBAL rejected        200                          0
+```
+
+Same load, same 3 processes — the only difference is *where the count lives*.
+With shared state + atomic Lua the client is held to exactly 100; with
+per-process counters it escapes to 300 (its limit, times the instance count).
+That gap is the entire reason the project exists. Reproduce it with
+[loadtest/distributed_demo.py](loadtest/distributed_demo.py) (see below).
+
+Single-instance load test: **100 allowed / 200 rejected**, exactly the limit,
+p50 ≈ 17 ms. Test suite (12 tests) includes a concurrency check firing 500
+racing requests at a limit of 100 and asserting **exactly** 100 are allowed.
+
+---
+
 ## Quick start (single node, no Redis required)
 
 The limiter falls back to an in-process `fakeredis` when no Redis server is
@@ -173,3 +201,7 @@ ratelimiter/
 loadtest/loadtest.py    concurrent load test
 deploy/nginx.conf       load balancer for the docker cluster
 ```
+
+## License
+
+[MIT](LICENSE) © 2026 Manan Ghonia
