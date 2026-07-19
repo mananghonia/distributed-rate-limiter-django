@@ -1,0 +1,45 @@
+# Render blueprint: one gateway web service + a managed Redis (Key Value) store.
+# Deploy by connecting this repo as a Blueprint in the Render dashboard.
+# See DEPLOY.md for the click-by-click steps.
+#
+# Note: the free plan runs a SINGLE instance, so this hosts a live, real-Redis
+# demo of rate limiting (429s, RateLimit-* headers) -- not the multi-instance
+# "distributed proof", which needs >1 instance (run that locally or via
+# docker-compose, per the README).
+services:
+  - type: web
+    name: rate-limiter-gateway
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    envVars:
+      - key: DJANGO_DEBUG
+        value: "0"
+      - key: DJANGO_SECRET_KEY
+        generateValue: true           # Render generates a strong secret
+      - key: RATELIMIT_USE_FAKEREDIS
+        value: "0"                     # use the real managed Redis, never the fallback
+      - key: RATELIMIT_ALGORITHM
+        value: sliding_window
+      - key: RATELIMIT_FAILURE_MODE
+        value: fail_open
+      # Render terminates TLS and redirects HTTP->HTTPS at its edge, so we don't
+      # set SECURE_SSL_REDIRECT (it would 301 the internal health check). HSTS is
+      # safe -- SecurityMiddleware only adds it on already-HTTPS requests.
+      - key: SECURE_HSTS_SECONDS
+        value: "31536000"
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: rate-limiter-kv
+          property: connectionString
+      # UPSTREAM_BASE_URL is intentionally unset: settings.py defaults it to this
+      # service's own RENDER_EXTERNAL_URL + /demo-upstream for the demo. Point it
+      # at your real backend to protect an actual API.
+
+  - type: keyvalue
+    name: rate-limiter-kv
+    plan: free
+    maxmemoryPolicy: noeviction        # never evict rate-limit counters
+    ipAllowList: []                    # internal-only; reachable from the service

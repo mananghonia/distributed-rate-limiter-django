@@ -17,7 +17,21 @@ def _env_bool(name: str, default: str = "0") -> bool:
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-insecure-change-me")
 DEBUG = _env_bool("DJANGO_DEBUG", "1")
-ALLOWED_HOSTS = ["*"]  # This is an edge gateway; host filtering happens upstream.
+
+# Host filtering. Defaults to "*" for local dev; in production set
+# DJANGO_ALLOWED_HOSTS to a comma-separated list. On Render, the platform-
+# provided hostname is picked up automatically.
+_hosts = os.environ.get("DJANGO_ALLOWED_HOSTS", "*")
+ALLOWED_HOSTS = [h.strip() for h in _hosts.split(",") if h.strip()]
+_render_host = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+if _render_host and _render_host not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(_render_host)
+
+# Behind Render/any TLS-terminating proxy, trust the forwarded-proto header and
+# the platform origin for CSRF so admin POST/DELETE endpoints work over HTTPS.
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+_render_url = os.environ.get("RENDER_EXTERNAL_URL")
+CSRF_TRUSTED_ORIGINS = [_render_url] if _render_url else []
 
 # Deliberately minimal: this is a stateless edge gateway, not a CMS. No auth /
 # contenttypes / ORM models -- all limiter state lives in Redis, so there's no
@@ -29,10 +43,22 @@ INSTALLED_APPS = [
 
 # NOTE: the RateLimitMiddleware is intentionally placed near the top so limiting
 # happens before any heavier processing. It only guards the proxy paths.
+# Session/CSRF/clickjacking middleware are deliberately omitted: this is a
+# stateless JSON gateway with no cookie auth and no HTML pages (the admin
+# endpoints are csrf_exempt operator-only). SecurityMiddleware is kept for
+# HTTPS redirect + HSTS behind a TLS-terminating proxy.
 MIDDLEWARE = [
+    "django.middleware.security.SecurityMiddleware",
     "django.middleware.common.CommonMiddleware",
     "ratelimiter.middleware.RateLimitMiddleware",
 ]
+
+# Off by default so local HTTP dev is unaffected; enabled via env in production
+# (see render.yaml). SECURE_PROXY_SSL_HEADER above lets these work behind Render.
+SECURE_SSL_REDIRECT = _env_bool("SECURE_SSL_REDIRECT", "0")
+SECURE_HSTS_SECONDS = int(os.environ.get("SECURE_HSTS_SECONDS", "0"))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = _env_bool("SECURE_HSTS_INCLUDE_SUBDOMAINS", "0")
+SECURE_CONTENT_TYPE_NOSNIFF = True
 
 ROOT_URLCONF = "gateway.urls"
 
@@ -58,10 +84,14 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # --------------------------------------------------------------------------
 # Rate limiter configuration
 # --------------------------------------------------------------------------
-# Where allowed requests are forwarded.
-UPSTREAM_BASE_URL = os.environ.get(
-    "UPSTREAM_BASE_URL", "http://127.0.0.1:8000/demo-upstream"
-)
+# Where allowed requests are forwarded. In production point UPSTREAM_BASE_URL at
+# your real backend. For the zero-config live demo we fall back to this service's
+# own bundled demo upstream: Render injects RENDER_EXTERNAL_URL, so an allowed
+# request round-trips to our own /demo-upstream and returns 200.
+_default_upstream = "http://127.0.0.1:8000/demo-upstream"
+if os.environ.get("RENDER_EXTERNAL_URL"):
+    _default_upstream = os.environ["RENDER_EXTERNAL_URL"].rstrip("/") + "/demo-upstream"
+UPSTREAM_BASE_URL = os.environ.get("UPSTREAM_BASE_URL", _default_upstream)
 UPSTREAM_TIMEOUT_SECONDS = float(os.environ.get("UPSTREAM_TIMEOUT_SECONDS", "10"))
 
 # Identifies this instance in responses (X-Gateway-Instance header). Lets the

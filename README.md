@@ -13,7 +13,8 @@ so the counting state is externalised into **Redis** and mutated with **atomic
 Lua scripts** so concurrent instances can't overcount.
 
 See [DESIGN.md](DESIGN.md) for the trade-offs (algorithm choice, the
-race-condition and its fix, identity resolution, fail-open vs fail-closed).
+race-condition and its fix, identity resolution, fail-open vs fail-closed), and
+[DEPLOY.md](DEPLOY.md) to stand up a live demo on Render's free tier.
 
 ---
 
