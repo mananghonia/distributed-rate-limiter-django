@@ -19,6 +19,8 @@ race-condition and its fix, identity resolution, fail-open vs fail-closed).
 
 ## Results — the distributed limit holds (and why it matters)
 
+![Distributed rate limiter proof: Redis+Lua holds the global limit at 100 while the in-memory backend lets it escape to 300](docs/distributed-proof.png)
+
 The headline experiment: **3 separate gateway processes, one shared Redis,
 300 concurrent requests** spread across all of them, free tier = 100/min.
 
