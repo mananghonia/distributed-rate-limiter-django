@@ -27,10 +27,13 @@ HOP_BY_HOP = {
     "trailers",
     "transfer-encoding",
     "upgrade",
-    "content-encoding",
     "content-length",
     "host",
 }
+# NOTE: content-encoding is deliberately NOT hop-by-hop here. We relay the body
+# verbatim (compressed bytes and all), so the encoding header must travel with it
+# -- otherwise the client receives compressed bytes it doesn't know to inflate.
+# content-length IS stripped: we let Django recompute it from the relayed bytes.
 
 
 def _forward_request_headers(request):
@@ -43,6 +46,11 @@ def _forward_request_headers(request):
     xff = request.META.get("HTTP_X_FORWARDED_FOR")
     client_ip = request.META.get("REMOTE_ADDR", "")
     headers["X-Forwarded-For"] = f"{xff}, {client_ip}" if xff else client_ip
+    # Only negotiate the encodings the client actually asked for. Without this,
+    # requests injects its own "Accept-Encoding: gzip", so the upstream would
+    # compress a response the client never said it could decompress -- and since
+    # we relay bodies verbatim, that client would get bytes it can't read.
+    headers["Accept-Encoding"] = request.headers.get("Accept-Encoding", "identity")
     return headers
 
 
@@ -60,6 +68,9 @@ def proxy_view(request):
             headers=_forward_request_headers(request),
             timeout=settings.UPSTREAM_TIMEOUT_SECONDS,
             allow_redirects=False,
+            # Relay the body untouched: don't let requests transparently inflate
+            # it, so what we forward matches the Content-Encoding header we relay.
+            stream=True,
         )
     except requests.Timeout:
         logger.warning("Upstream timeout for %s", target)
@@ -68,10 +79,9 @@ def proxy_view(request):
         logger.warning("Upstream error for %s: %s", target, exc)
         return HttpResponse("Bad gateway", status=502)
 
-    response = HttpResponse(
-        content=upstream_response.content,
-        status=upstream_response.status_code,
-    )
+    # Raw, still-encoded bytes exactly as the upstream sent them.
+    raw_body = upstream_response.raw.read(decode_content=False)
+    response = HttpResponse(content=raw_body, status=upstream_response.status_code)
     for key, value in upstream_response.headers.items():
         if key.lower() in HOP_BY_HOP:
             continue

@@ -131,7 +131,8 @@ class MiddlewareHttpTests(SimpleTestCase):
     def _mock_upstream(self):
         fake = mock.Mock()
         fake.status_code = 200
-        fake.content = b'{"ok": true}'
+        # proxy relays raw, still-encoded bytes via .raw.read(decode_content=False)
+        fake.raw.read.return_value = b'{"ok": true}'
         fake.headers = {"Content-Type": "application/json"}
         return mock.patch("ratelimiter.proxy.requests.request", return_value=fake)
 
