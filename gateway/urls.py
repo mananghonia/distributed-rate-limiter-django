@@ -4,6 +4,11 @@ from ratelimiter import views as rl_views
 from ratelimiter.proxy import proxy_view
 
 urlpatterns = [
+    # Human-friendly landing page + favicon so browser visitors don't fall
+    # through to the proxy catch-all.
+    path("", rl_views.index, name="index"),
+    path("favicon.ico", rl_views.favicon, name="favicon"),
+
     # Operational endpoints on the gateway itself (never proxied, never limited).
     path("healthz", rl_views.healthz, name="healthz"),
     path("metrics", rl_views.metrics, name="metrics"),

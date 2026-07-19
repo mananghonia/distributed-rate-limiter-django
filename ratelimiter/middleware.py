@@ -28,6 +28,8 @@ from .metrics import METRICS
 
 # Gateway-operational paths that must never be rate-limited or proxied.
 _EXEMPT_PREFIXES = ("/healthz", "/metrics", "/admin/", "/demo-upstream/")
+# Exact-match exemptions (can't be prefixes: "/" is a prefix of everything).
+_EXEMPT_EXACT = ("/", "/favicon.ico")
 
 
 def _apply_headers(response, result):
@@ -44,7 +46,7 @@ class RateLimitMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
-        if request.path.startswith(_EXEMPT_PREFIXES):
+        if request.path in _EXEMPT_EXACT or request.path.startswith(_EXEMPT_PREFIXES):
             return self.get_response(request)
 
         identity = resolve_identity(request)

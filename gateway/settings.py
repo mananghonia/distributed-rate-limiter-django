@@ -86,11 +86,13 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # --------------------------------------------------------------------------
 # Where allowed requests are forwarded. In production point UPSTREAM_BASE_URL at
 # your real backend. For the zero-config live demo we fall back to this service's
-# own bundled demo upstream: Render injects RENDER_EXTERNAL_URL, so an allowed
-# request round-trips to our own /demo-upstream and returns 200.
-_default_upstream = "http://127.0.0.1:8000/demo-upstream"
-if os.environ.get("RENDER_EXTERNAL_URL"):
-    _default_upstream = os.environ["RENDER_EXTERNAL_URL"].rstrip("/") + "/demo-upstream"
+# OWN bundled demo upstream over loopback -- deliberately NOT the public URL:
+# self-proxying via the edge would take an extra round-trip and, on a small
+# worker pool, deadlock (a worker blocked on a call back into its own pool).
+# Loopback keeps it in-process-fast and avoids the extra hop. $PORT is set by
+# the platform (e.g. Render); locally it defaults to 8000.
+_port = os.environ.get("PORT", "8000")
+_default_upstream = f"http://127.0.0.1:{_port}/demo-upstream"
 UPSTREAM_BASE_URL = os.environ.get("UPSTREAM_BASE_URL", _default_upstream)
 UPSTREAM_TIMEOUT_SECONDS = float(os.environ.get("UPSTREAM_TIMEOUT_SECONDS", "10"))
 

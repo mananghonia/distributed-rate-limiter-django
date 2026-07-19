@@ -11,4 +11,7 @@ COPY . .
 EXPOSE 8000
 # Shell form so $PORT expands. Render assigns $PORT at runtime; local
 # docker-compose has no $PORT set, so it falls back to 8000.
-CMD gunicorn gateway.wsgi:application --bind 0.0.0.0:${PORT:-8000} --workers 2
+# Threaded (gthread) workers: the demo self-proxies to its own /demo-upstream,
+# so a request thread blocks on an in-process HTTP call -- threads give enough
+# concurrency that this can't starve the worker pool.
+CMD gunicorn gateway.wsgi:application --bind 0.0.0.0:${PORT:-8000} --workers 2 --threads 8 --timeout 60
