@@ -1,0 +1,38 @@
+# Spins up Redis plus 3 identical gateway instances behind an nginx load
+# balancer, so you can prove the rate limit holds *globally* across instances.
+#
+#   docker compose up --build
+#   # gateway reachable at http://localhost:8080 (load-balanced over 3 nodes)
+#
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  gateway:
+    build: .
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      RATELIMIT_USE_FAKEREDIS: "0"
+      RATELIMIT_ALGORITHM: sliding_window
+      UPSTREAM_BASE_URL: http://gateway:8000/demo-upstream
+      DJANGO_DEBUG: "0"
+    depends_on:
+      - redis
+    # 3 identical instances -> the whole point of "distributed".
+    deploy:
+      replicas: 3
+    expose:
+      - "8000"
+    command: >
+      gunicorn gateway.wsgi:application --bind 0.0.0.0:8000 --workers 2
+
+  lb:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - gateway

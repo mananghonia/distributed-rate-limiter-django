@@ -1,0 +1,7 @@
+Django==5.0.6
+redis==5.0.1
+requests==2.32.3
+# Dev/test fallback so the limiter works without a running Redis server.
+# lupa gives fakeredis server-side Lua scripting, which our atomic scripts need.
+fakeredis>=2.26
+lupa>=2.0
