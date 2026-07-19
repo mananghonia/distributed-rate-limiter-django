@@ -1,5 +1,12 @@
 # Distributed Rate-Limiting Gateway (Django)
 
+**Live demo:** https://rate-limiter-gateway-yjfs.onrender.com &nbsp;·&nbsp;
+try [`/healthz`](https://rate-limiter-gateway-yjfs.onrender.com/healthz) ·
+[`/ping`](https://rate-limiter-gateway-yjfs.onrender.com/ping) ·
+[`/metrics`](https://rate-limiter-gateway-yjfs.onrender.com/metrics)
+<br><sub>(free Render instance — the first request after idle may take ~50s to
+cold-start, then it's fast)</sub>
+
 A standalone gateway that sits **in front of** one or more backend APIs. Every
 request passes through it first: it decides whether the client has exceeded its
 allowed request rate. If yes → `429 Too Many Requests`; if no → the request is
