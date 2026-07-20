@@ -9,7 +9,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
-from django.test import Client, SimpleTestCase, override_settings
+from django.test import Client, RequestFactory, SimpleTestCase, override_settings
 
 from .backends.redis_backend import RedisRateLimiter
 from .config import ClientIdentity, resolve_identity, resolve_rule
@@ -39,6 +39,12 @@ class AlgorithmTests(SimpleTestCase):
         lim = RedisRateLimiter(self.redis, "sliding_window")
         rule = LimitRule(limit=3, window_seconds=60, name="t")
         verdicts = [lim.check("rl:{b}:t", rule).allowed for _ in range(5)]
+        self.assertEqual(verdicts, [True, True, True, False, False])
+
+    def test_sliding_window_log_allows_up_to_limit_then_denies(self):
+        lim = RedisRateLimiter(self.redis, "sliding_window_log")
+        rule = LimitRule(limit=3, window_seconds=60, name="t")
+        verdicts = [lim.check("rl:{e}:t", rule).allowed for _ in range(5)]
         self.assertEqual(verdicts, [True, True, True, False, False])
 
     def test_token_bucket_allows_burst_up_to_capacity(self):
@@ -183,3 +189,149 @@ class FailureModeTests(SimpleTestCase):
             result, ok = limiter.check_limit("k", LimitRule(5, 60, name="t"))
         self.assertFalse(result.allowed)
         self.assertFalse(ok)
+
+
+@override_settings(UPSTREAM_BASE_URL="http://upstream.test/api")
+class ProxyTests(SimpleTestCase):
+    """The proxy layer -- including regressions for the two bugs found in
+    production (compressed-body relay, Accept-Encoding negotiation)."""
+
+    def setUp(self):
+        self.rf = RequestFactory()
+
+    def _fake_upstream(self, body=b'{"ok":true}', status=200, headers=None):
+        fake = mock.Mock()
+        fake.status_code = status
+        # proxy relays raw bytes via .raw.read(decode_content=False)
+        fake.raw.read.return_value = body
+        fake.headers = headers or {"Content-Type": "application/json"}
+        return fake
+
+    def test_forwards_method_path_body_and_relays_status(self):
+        from ratelimiter import proxy
+
+        req = self.rf.post("/things/1", data=b"payload",
+                           content_type="application/octet-stream")
+        with mock.patch("ratelimiter.proxy.requests.request",
+                        return_value=self._fake_upstream(b"CREATED", 201)) as m:
+            resp = proxy.proxy_view(req)
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.content, b"CREATED")
+        kwargs = m.call_args.kwargs
+        self.assertEqual(kwargs["method"], "POST")
+        self.assertEqual(kwargs["url"], "http://upstream.test/api/things/1")
+        self.assertEqual(kwargs["data"], b"payload")
+
+    def test_relays_compressed_body_verbatim(self):
+        # Regression: a gzipped upstream body must pass through untouched, with
+        # Content-Encoding preserved and Content-Length recomputed for the bytes
+        # we actually send. (The original bug returned compressed bytes with the
+        # encoding header stripped, so clients saw garbage.)
+        import gzip
+
+        from ratelimiter import proxy
+
+        payload = b'{"real":"json","n":1}'
+        gzipped = gzip.compress(payload)
+        headers = {"Content-Type": "application/json",
+                   "Content-Encoding": "gzip",
+                   "Content-Length": "99999"}  # upstream's length -- must be dropped
+        req = self.rf.get("/data")
+        with mock.patch("ratelimiter.proxy.requests.request",
+                        return_value=self._fake_upstream(gzipped, 200, headers)):
+            resp = proxy.proxy_view(req)
+        self.assertEqual(resp.content, gzipped)               # bytes untouched
+        self.assertEqual(resp["Content-Encoding"], "gzip")     # header preserved
+        # upstream's stale Content-Length must NOT be relayed (Django recomputes
+        # it from the actual bytes at finalization).
+        self.assertNotEqual(resp.get("Content-Length"), "99999")
+        self.assertEqual(gzip.decompress(resp.content), payload)     # inflatable
+
+    def test_strips_hop_by_hop_headers(self):
+        from ratelimiter import proxy
+
+        headers = {"Content-Type": "application/json",
+                   "Transfer-Encoding": "chunked",
+                   "Connection": "keep-alive"}
+        req = self.rf.get("/x")
+        with mock.patch("ratelimiter.proxy.requests.request",
+                        return_value=self._fake_upstream(b"{}", 200, headers)):
+            resp = proxy.proxy_view(req)
+        self.assertNotIn("Transfer-Encoding", resp)
+        self.assertNotIn("Connection", resp)
+        self.assertEqual(resp["Content-Type"], "application/json")
+
+    def test_forwards_only_client_accept_encoding(self):
+        # Regression: never request an encoding the client didn't ask for.
+        from ratelimiter import proxy
+
+        req = self.rf.get("/x")  # client sends no Accept-Encoding
+        with mock.patch("ratelimiter.proxy.requests.request",
+                        return_value=self._fake_upstream()) as m:
+            proxy.proxy_view(req)
+        self.assertEqual(m.call_args.kwargs["headers"]["Accept-Encoding"], "identity")
+
+        req2 = self.rf.get("/x", HTTP_ACCEPT_ENCODING="gzip")
+        with mock.patch("ratelimiter.proxy.requests.request",
+                        return_value=self._fake_upstream()) as m2:
+            proxy.proxy_view(req2)
+        self.assertEqual(m2.call_args.kwargs["headers"]["Accept-Encoding"], "gzip")
+
+    def test_upstream_timeout_returns_504(self):
+        import requests as rq
+
+        from ratelimiter import proxy
+
+        req = self.rf.get("/x")
+        with mock.patch("ratelimiter.proxy.requests.request", side_effect=rq.Timeout()):
+            resp = proxy.proxy_view(req)
+        self.assertEqual(resp.status_code, 504)
+
+    def test_upstream_connection_error_returns_502(self):
+        import requests as rq
+
+        from ratelimiter import proxy
+
+        req = self.rf.get("/x")
+        with mock.patch("ratelimiter.proxy.requests.request",
+                        side_effect=rq.ConnectionError()):
+            resp = proxy.proxy_view(req)
+        self.assertEqual(resp.status_code, 502)
+
+
+class AdminAuthTests(SimpleTestCase):
+    """The operator-only admin endpoints must not be open on a public deploy."""
+
+    def setUp(self):
+        _fresh_redis()
+        self.client = Client()
+
+    @override_settings(RATELIMIT_ADMIN_TOKEN="s3cret", DEBUG=False)
+    def test_requires_token_when_configured(self):
+        self.assertEqual(self.client.get("/admin/limits/ip:1.2.3.4").status_code, 403)
+        ok = self.client.get("/admin/limits/ip:1.2.3.4", HTTP_X_ADMIN_TOKEN="s3cret")
+        self.assertEqual(ok.status_code, 200)
+
+    @override_settings(RATELIMIT_ADMIN_TOKEN="s3cret", DEBUG=False)
+    def test_wrong_token_denied(self):
+        r = self.client.get("/admin/limits/ip:1.2.3.4", HTTP_X_ADMIN_TOKEN="nope")
+        self.assertEqual(r.status_code, 403)
+
+    @override_settings(RATELIMIT_ADMIN_TOKEN="", DEBUG=False)
+    def test_denied_in_production_when_no_token_set(self):
+        self.assertEqual(self.client.get("/admin/limits/ip:1.2.3.4").status_code, 403)
+
+    @override_settings(RATELIMIT_ADMIN_TOKEN="", DEBUG=True)
+    def test_allowed_in_debug_without_token(self):
+        self.assertEqual(self.client.get("/admin/limits/ip:1.2.3.4").status_code, 200)
+
+    @override_settings(RATELIMIT_ADMIN_TOKEN="", DEBUG=True)
+    def test_inspects_sorted_set_key_without_error(self):
+        # Regression: sliding_window_log stores a ZSET; the admin view must not
+        # blindly GET it (WRONGTYPE -> 500).
+        redis = get_redis()
+        lim = RedisRateLimiter(redis, "sliding_window_log")
+        lim.check("rl:{ip:5.5.5.5}:default", LimitRule(3, 60, name="default"))
+        resp = self.client.get("/admin/limits/ip:5.5.5.5")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("rl:{ip:5.5.5.5}:default", resp.json()["keys"])

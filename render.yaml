@@ -24,6 +24,8 @@ services:
         value: sliding_window
       - key: RATELIMIT_FAILURE_MODE
         value: fail_open
+      - key: RATELIMIT_ADMIN_TOKEN
+        generateValue: true            # guards /admin/limits on the public URL
       # Render terminates TLS and redirects HTTP->HTTPS at its edge, so we don't
       # set SECURE_SSL_REDIRECT (it would 301 the internal health check). HSTS is
       # safe -- SecurityMiddleware only adds it on already-HTTPS requests.

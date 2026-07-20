@@ -55,8 +55,10 @@ boundary burst without the memory cost of a full log.* Token bucket is offered a
 a second implementation for when bursts should be explicitly allowed (the `paid`
 tier sets `burst=200`).
 
-All three are implemented and switchable via `RATELIMIT_ALGORITHM`, so they can
-be compared directly.
+All four are implemented and switchable via `RATELIMIT_ALGORITHM`
+(`fixed_window`, `sliding_window` = the counter, `sliding_window_log`,
+`token_bucket`), so they can be compared directly. The counter is the default;
+the log is included to make the accuracy-vs-memory trade-off concrete.
 
 ## 4. Identity: what defines "a client"?
 

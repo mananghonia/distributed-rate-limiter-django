@@ -1,0 +1,16 @@
+.git
+.github
+.gitignore
+__pycache__/
+*.py[cod]
+*.sqlite3
+.env
+.venv/
+venv/
+*.log
+.DS_Store
+# Docs and local-only assets don't belong in the runtime image.
+docs/
+*.md
+loadtest/
+deploy/

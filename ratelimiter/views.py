@@ -73,14 +73,31 @@ def metrics(request):
     return JsonResponse(METRICS.snapshot())
 
 
+def _admin_authorized(request) -> bool:
+    """Operator-only guard. If RATELIMIT_ADMIN_TOKEN is set, require it via the
+    X-Admin-Token header. If it isn't set, only permit access in DEBUG (local
+    dev) -- a deployed gateway with no token configured refuses admin access
+    rather than exposing it."""
+    token = settings.RATELIMIT_ADMIN_TOKEN
+    if token:
+        # constant-time compare to avoid leaking the token via timing
+        import hmac
+
+        return hmac.compare_digest(request.headers.get("X-Admin-Token", ""), token)
+    return settings.DEBUG
+
+
 @csrf_exempt
 def admin_limit_state(request, identity):
     """Inspect (GET) or reset (DELETE) the Redis keys backing a client's limits.
 
     `identity` is the bucket id, e.g. "apikey:paid-key-456" or "ip:1.2.3.4".
     Handy for live debugging and demos ("reset my limit and watch it refill").
-    In production this would sit behind auth -- it's operator-only.
+    Operator-only: guarded by X-Admin-Token (see _admin_authorized).
     """
+    if not _admin_authorized(request):
+        return JsonResponse({"error": "admin access denied"}, status=403)
+
     redis = get_redis()
     # Keys are namespaced rl:{<identity>}:<rule>; match all rules for this id.
     pattern = f"rl:{{{identity}}}:*"
@@ -93,20 +110,25 @@ def admin_limit_state(request, identity):
         deleted = redis.delete(*keys) if keys else 0
         return JsonResponse({"identity": identity, "deleted_keys": deleted})
 
+    def _dec(x):
+        return x.decode() if isinstance(x, bytes) else x
+
     state = {}
     for k in keys:
         ttl = redis.ttl(k)
-        ktype = redis.type(k).decode() if isinstance(redis.type(k), bytes) else redis.type(k)
+        ktype = _dec(redis.type(k))
+        # Each algorithm stores its counters differently: fixed_window is a
+        # string, sliding_window/token_bucket a hash, sliding_window_log a
+        # sorted set. Read whichever type this key actually is.
         if ktype == "hash":
-            raw = redis.hgetall(k)
-            value = {
-                (f.decode() if isinstance(f, bytes) else f): (
-                    v.decode() if isinstance(v, bytes) else v
-                )
-                for f, v in raw.items()
-            }
+            value = {_dec(f): _dec(v) for f, v in redis.hgetall(k).items()}
+        elif ktype == "zset":
+            # sliding-window log: members are request markers; the count is what
+            # matters, so report the size plus the score range (window span).
+            value = {"type": "zset", "count": redis.zcard(k)}
+        elif ktype == "string":
+            value = _dec(redis.get(k))
         else:
-            v = redis.get(k)
-            value = v.decode() if isinstance(v, bytes) else v
+            value = {"type": ktype}
         state[k] = {"ttl": ttl, "value": value}
     return JsonResponse({"identity": identity, "keys": state})

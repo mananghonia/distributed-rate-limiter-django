@@ -107,6 +107,12 @@ RATELIMIT_ALGORITHM = os.environ.get("RATELIMIT_ALGORITHM", "sliding_window")
 # fail_open -> allow when Redis is unreachable; fail_closed -> reject.
 RATELIMIT_FAILURE_MODE = os.environ.get("RATELIMIT_FAILURE_MODE", "fail_open")
 
+# Secret guarding the operator-only /admin/limits endpoints. When set, callers
+# must send it as the X-Admin-Token header. When unset, admin access is allowed
+# only in DEBUG (local dev) and refused in production -- so a deployed gateway is
+# never left with open admin endpoints by default.
+RATELIMIT_ADMIN_TOKEN = os.environ.get("RATELIMIT_ADMIN_TOKEN", "")
+
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,

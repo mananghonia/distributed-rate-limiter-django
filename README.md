@@ -1,5 +1,8 @@
 # Distributed Rate-Limiting Gateway (Django)
 
+[![tests](https://github.com/mananghonia/distributed-rate-limiter-django/actions/workflows/ci.yml/badge.svg)](https://github.com/mananghonia/distributed-rate-limiter-django/actions/workflows/ci.yml)
+&nbsp;·&nbsp; [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **Live demo:** https://rate-limiter-gateway-yjfs.onrender.com &nbsp;·&nbsp;
 try [`/healthz`](https://rate-limiter-gateway-yjfs.onrender.com/healthz) ·
 [`/ping`](https://rate-limiter-gateway-yjfs.onrender.com/ping) ·
@@ -22,6 +25,33 @@ Lua scripts** so concurrent instances can't overcount.
 See [DESIGN.md](DESIGN.md) for the trade-offs (algorithm choice, the
 race-condition and its fix, identity resolution, fail-open vs fail-closed), and
 [DEPLOY.md](DEPLOY.md) to stand up a live demo on Render's free tier.
+
+## How it works
+
+```mermaid
+flowchart LR
+    C[Client] -->|request| LB[Load balancer]
+    LB --> G1[Gateway instance 1]
+    LB --> G2[Gateway instance 2]
+    LB --> G3[Gateway instance 3]
+    G1 & G2 & G3 -->|atomic INCR + check<br/>via Lua| R[(Redis<br/>shared counters)]
+    G1 -->|under limit: forward| U[Upstream API]
+    G1 -.->|over limit| X[429 + Retry-After]
+    U -->|response| C
+```
+
+Every instance runs the **same** limit check against the **one** shared Redis, so
+the limit is global no matter which instance a request lands on. The check is a
+single Lua script Redis runs atomically — that's what stops two instances from
+both reading "99" and both allowing the 100th request. Inside one request:
+
+```
+request ─▶ resolve identity (API key ▸ IP)
+        ─▶ resolve rule (tier + per-endpoint override)
+        ─▶ atomic limit check in Redis (Lua)
+        ─▶ allowed?  ── yes ─▶ proxy to upstream, attach RateLimit-* headers
+                     └─ no  ─▶ 429 + Retry-After
+```
 
 ---
 
@@ -84,9 +114,12 @@ curl -i -H "X-API-Key: paid-key-456" http://127.0.0.1:8000/ping
 # Observability
 curl http://127.0.0.1:8000/metrics
 
-# Inspect / reset a client's live limit state
+# Inspect / reset a client's live limit state (operator-only).
+# Open in local DEBUG; in production it requires RATELIMIT_ADMIN_TOKEN via the
+# X-Admin-Token header (Render generates one automatically).
 curl http://127.0.0.1:8000/admin/limits/ip:127.0.0.1
 curl -X DELETE http://127.0.0.1:8000/admin/limits/ip:127.0.0.1
+# production: curl -H "X-Admin-Token: <token>" https://<host>/admin/limits/ip:1.2.3.4
 ```
 
 > `fakeredis` is per-process, so single-node only. To prove the *distributed*
@@ -173,7 +206,7 @@ All via environment variables (see [.env.example](.env.example)):
 | `UPSTREAM_BASE_URL` | bundled demo | where allowed requests are forwarded |
 | `REDIS_URL` | `redis://127.0.0.1:6379/0` | Redis connection |
 | `RATELIMIT_USE_FAKEREDIS` | `1` | fall back to in-process fakeredis if Redis is down |
-| `RATELIMIT_ALGORITHM` | `sliding_window` | `fixed_window` \| `sliding_window` \| `token_bucket` \| `memory` |
+| `RATELIMIT_ALGORITHM` | `sliding_window` | `fixed_window` \| `sliding_window` \| `sliding_window_log` \| `token_bucket` \| `memory` |
 | `RATELIMIT_FAILURE_MODE` | `fail_open` | `fail_open` \| `fail_closed` when Redis is unreachable |
 
 `RATELIMIT_ALGORITHM=memory` selects the single-node in-memory baseline
@@ -189,7 +222,8 @@ config service without touching the checking logic.
 python manage.py test ratelimiter
 ```
 
-Covers all three algorithms, the multi-dimensional config, 429 behaviour,
+23 tests covering all four algorithms, the multi-dimensional config, the proxy
+(including compressed-body relay), admin-endpoint auth, 429 behaviour,
 fail-open/closed, and the **concurrency/atomicity guarantee** (500 racing
 requests → exactly `limit` allowed).
 

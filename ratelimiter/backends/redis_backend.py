@@ -10,6 +10,7 @@ Redis executes atomically server-side, which eliminates the race regardless of
 how many instances hit the same key at the same millisecond.
 """
 import time
+import uuid
 from pathlib import Path
 
 from ..types import LimitResult, LimitRule
@@ -24,7 +25,7 @@ def _load(script_name: str) -> str:
 class RedisRateLimiter:
     """Distributed limiter. `algorithm` selects which Lua script backs it."""
 
-    ALGORITHMS = {"fixed_window", "sliding_window", "token_bucket"}
+    ALGORITHMS = {"fixed_window", "sliding_window", "sliding_window_log", "token_bucket"}
 
     def __init__(self, redis_client, algorithm: str = "sliding_window"):
         if algorithm not in self.ALGORITHMS:
@@ -37,6 +38,7 @@ class RedisRateLimiter:
         self._scripts = {
             "fixed_window": redis_client.register_script(_load("fixed_window.lua")),
             "sliding_window": redis_client.register_script(_load("sliding_window.lua")),
+            "sliding_window_log": redis_client.register_script(_load("sliding_window_log.lua")),
             "token_bucket": redis_client.register_script(_load("token_bucket.lua")),
         }
 
@@ -49,6 +51,12 @@ class RedisRateLimiter:
         elif self.algorithm == "sliding_window":
             raw = self._scripts["sliding_window"](
                 keys=[key], args=[rule.limit, rule.window_seconds, now]
+            )
+        elif self.algorithm == "sliding_window_log":
+            # unique member so two requests at the same timestamp both count
+            member = f"{now}:{uuid.uuid4().hex}"
+            raw = self._scripts["sliding_window_log"](
+                keys=[key], args=[rule.limit, rule.window_seconds, now, member]
             )
         else:  # token_bucket
             capacity = rule.effective_burst
